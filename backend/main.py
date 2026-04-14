@@ -192,6 +192,12 @@ async def start_ingest(
 async def ingest_status():
     """Current ingest progress."""
     progress = ingest.get_progress()
-    # Also pull the last persisted job in case the server was restarted
     db_job = await database.get_latest_ingest_job()
     return {"progress": progress, "last_job": db_job}
+
+
+@app.post("/api/ingest/reset")
+async def reset_ingest():
+    """Force-reset a stuck ingest back to idle so a new one can be started."""
+    ingest.reset_progress()
+    return {"message": "Ingest state reset to idle"}

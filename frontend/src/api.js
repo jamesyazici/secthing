@@ -15,4 +15,5 @@ export const api = {
   getCompany:       (cik)    => request(`/api/companies/${cik}`),
   startIngest:      (force)  => request(`/api/ingest/start?force=${force}`, { method: 'POST' }),
   getIngestStatus:  ()       => request('/api/ingest/status'),
+  resetIngest:      ()       => request('/api/ingest/reset', { method: 'POST' }),
 }

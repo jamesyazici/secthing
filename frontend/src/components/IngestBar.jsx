@@ -43,6 +43,11 @@ export default function IngestBar({ onRefresh }) {
     setOpen(false)
   }
 
+  async function handleReset() {
+    await api.resetIngest()
+    await fetchStatus()
+  }
+
   const running  = status?.status === 'running'
   const pct      = status?.total > 0
     ? Math.round((status.processed / status.total) * 100)
@@ -77,21 +82,33 @@ export default function IngestBar({ onRefresh }) {
           {running ? (
             <div>
               <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
-                <span>{status.processed.toLocaleString()} / {status.total.toLocaleString()} companies</span>
+                <span>
+                  {status.total > 0
+                    ? `${status.processed.toLocaleString()} / ${status.total.toLocaleString()} companies`
+                    : 'Fetching company list from SEC…'}
+                </span>
                 <span>{pct}%</span>
               </div>
               <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-2">
                 <div
-                  className="bg-blue-500 h-2 rounded-full transition-all duration-500"
-                  style={{ width: `${pct}%` }}
+                  className={`h-2 rounded-full transition-all duration-500 ${status.total > 0 ? 'bg-blue-500' : 'bg-blue-400 animate-pulse w-full'}`}
+                  style={{ width: status.total > 0 ? `${pct}%` : '100%' }}
                 />
               </div>
               {status.failed > 0 && (
                 <p className="text-xs text-amber-500 mt-2">{status.failed} failed (SEC errors, retried)</p>
               )}
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-2">
-                Respecting SEC rate limits (~7 req/s). This takes ~15–20 min for a full ingest.
+                {status.total > 0
+                  ? `Respecting SEC rate limits (~7 req/s). This takes ~15–20 min for a full ingest.`
+                  : 'Downloading company index from SEC (one-time, may take up to 60s)…'}
               </p>
+              <button
+                onClick={handleReset}
+                className="mt-3 w-full py-1.5 text-xs text-red-400 hover:text-red-600 border border-red-200 dark:border-red-800 rounded transition-colors"
+              >
+                Cancel / Reset stuck ingest
+              </button>
             </div>
           ) : (
             <div className="space-y-3">

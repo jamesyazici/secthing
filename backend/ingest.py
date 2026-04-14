@@ -50,6 +50,13 @@ def get_progress() -> dict:
     return dict(_progress)
 
 
+def reset_progress():
+    _progress.update({
+        "status": "idle", "total": 0, "processed": 0,
+        "failed": 0, "started_at": None, "completed_at": None, "job_id": None,
+    })
+
+
 def _update(status=None, **kwargs):
     if status:
         _progress["status"] = status
@@ -57,10 +64,10 @@ def _update(status=None, **kwargs):
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
-async def _fetch(client: httpx.AsyncClient, url: str) -> dict | None:
+async def _fetch(client: httpx.AsyncClient, url: str, timeout: int = 30) -> dict | None:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = await client.get(url, headers=HEADERS, timeout=30)
+            resp = await client.get(url, headers=HEADERS, timeout=timeout)
             await asyncio.sleep(DELAY)   # pace every request regardless of outcome
 
             if resp.status_code == 200:
@@ -134,7 +141,8 @@ async def run_ingest(force: bool = False):
         # ── Step 1: fetch company list ─────────────────────────────────────────
         logger.info("Fetching company tickers list …")
         ticker_data = await _fetch(
-            client, "https://www.sec.gov/files/company_tickers_exchange.json"
+            client, "https://www.sec.gov/files/company_tickers_exchange.json",
+            timeout=60,
         )
         if not ticker_data:
             logger.error("Failed to fetch company tickers list")
