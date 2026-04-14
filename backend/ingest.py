@@ -4,7 +4,7 @@ SEC EDGAR data ingestion.
 Rate limits:
   - SEC allows max 10 requests/second
   - We use 7 req/sec (DELAY = 0.143s) to stay safely under the limit
-  - A semaphore caps concurrent requests at 5
+  - Companies are processed one at a time in a simple loop (no gather)
   - On 429 responses we back off and retry
 
 Data source:
@@ -23,15 +23,15 @@ import database
 logger = logging.getLogger(__name__)
 
 # ── rate-limit settings ────────────────────────────────────────────────────────
-DELAY       = 0.143          # seconds between requests  (~7 req/s)
-MAX_CONCURRENT = 5           # concurrent in-flight requests
-MAX_RETRIES = 3
-BACKOFF_BASE = 2.0           # seconds; doubles on each retry
+DELAY        = 0.143   # seconds between requests (~7 req/s, well under SEC's 10 req/s limit)
+MAX_RETRIES  = 3
+BACKOFF_BASE = 2.0     # seconds; doubles on each retry
+BATCH_SIZE   = 25      # write to DB every N companies
 
 # ── headers required by SEC ───────────────────────────────────────────────────
 HEADERS = {
-    "User-Agent":       "SEC Explorer contact@secexplorer.local",
-    "Accept-Encoding":  "gzip, deflate",
+    "User-Agent":      "SEC Explorer contact@secexplorer.local",
+    "Accept-Encoding": "gzip, deflate",
 }
 
 # ── shared progress state (in-memory, single process) ────────────────────────
@@ -57,12 +57,11 @@ def _update(status=None, **kwargs):
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
-async def _fetch(client: httpx.AsyncClient, url: str, sem: asyncio.Semaphore) -> dict | None:
+async def _fetch(client: httpx.AsyncClient, url: str) -> dict | None:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with sem:
-                resp = await client.get(url, headers=HEADERS, timeout=20)
-                await asyncio.sleep(DELAY)          # pace after every request
+            resp = await client.get(url, headers=HEADERS, timeout=30)
+            await asyncio.sleep(DELAY)   # pace every request regardless of outcome
 
             if resp.status_code == 200:
                 return resp.json()
@@ -82,12 +81,12 @@ async def _fetch(client: httpx.AsyncClient, url: str, sem: asyncio.Semaphore) ->
 
 # ── parsing ────────────────────────────────────────────────────────────────────
 def _parse_submission(cik_str: str, data: dict, ticker: str, exchange: str) -> dict:
-    """Extract the fields we care about from a submissions JSON blob."""
     addresses = data.get("addresses", {})
     biz = addresses.get("business", {})
 
-    # Earliest filing year from the 'recent' filings list
-    filing_dates: list[str] = data.get("filings", {}).get("recent", {}).get("filingDate", [])
+    filing_dates: list[str] = (
+        data.get("filings", {}).get("recent", {}).get("filingDate", [])
+    )
     first_year = None
     if filing_dates:
         try:
@@ -117,8 +116,8 @@ def _parse_submission(cik_str: str, data: dict, ticker: str, exchange: str) -> d
 # ── main ingest ────────────────────────────────────────────────────────────────
 async def run_ingest(force: bool = False):
     """
-    Full ingest pipeline.  Runs as a background asyncio task.
-    Set force=True to re-fetch companies already in the DB.
+    Full ingest pipeline. Processes companies one at a time in a simple loop
+    so memory stays flat and progress tracking is accurate.
     """
     if _progress["status"] == "running":
         logger.info("Ingest already running – ignoring duplicate request")
@@ -130,15 +129,12 @@ async def run_ingest(force: bool = False):
     job_id = await database.create_ingest_job()
     _progress["job_id"] = job_id
 
-    sem = asyncio.Semaphore(MAX_CONCURRENT)
-
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        # ── Step 1: download company ticker list ──────────────────────────────
+
+        # ── Step 1: fetch company list ─────────────────────────────────────────
         logger.info("Fetching company tickers list …")
         ticker_data = await _fetch(
-            client,
-            "https://www.sec.gov/files/company_tickers_exchange.json",
-            sem,
+            client, "https://www.sec.gov/files/company_tickers_exchange.json"
         )
         if not ticker_data:
             logger.error("Failed to fetch company tickers list")
@@ -146,22 +142,18 @@ async def run_ingest(force: bool = False):
             await database.update_ingest_job(job_id, 0, 0, 0, "failed")
             return
 
-        # ticker_data is a dict {"0": {cik_str, ticker, title, exchange}, ...}
-        entries = list(ticker_data.values())
-
-        # De-duplicate by CIK (same company may have multiple share-class tickers)
+        # De-duplicate by CIK
         seen: dict[str, dict] = {}
-        for e in entries:
+        for e in ticker_data.values():
             cik = str(e.get("cik_str", "")).strip()
             if cik and cik not in seen:
                 seen[cik] = e
         unique = list(seen.values())
 
-        # Optionally skip CIKs already in DB
         if not force:
             existing = await database.get_existing_ciks()
             unique = [e for e in unique if str(e.get("cik_str", "")) not in existing]
-            logger.info("%d new companies to fetch (skipping %d already in DB)",
+            logger.info("%d new companies to fetch (%d already in DB)",
                         len(unique), len(existing))
 
         total = len(unique)
@@ -169,48 +161,46 @@ async def run_ingest(force: bool = False):
         await database.update_ingest_job(job_id, 0, 0, total, "running")
 
         if total == 0:
+            logger.info("Nothing new to ingest")
             _update(status="completed", completed_at=datetime.now(timezone.utc).isoformat())
             await database.update_ingest_job(job_id, 0, 0, 0, "completed")
             return
 
-        # ── Step 2: fetch submission data for each company ────────────────────
+        # ── Step 2: fetch each company one at a time ───────────────────────────
         processed = 0
-        failed = 0
+        failed    = 0
         batch: list[dict] = []
-        BATCH_SIZE = 50       # write to DB every N companies
 
-        async def fetch_one(entry: dict):
-            nonlocal processed, failed
-            cik_int = entry.get("cik_str", 0)
-            cik_str = str(cik_int)
+        for i, entry in enumerate(unique):
+            cik_str    = str(entry.get("cik_str", ""))
             cik_padded = cik_str.zfill(10)
-            ticker = entry.get("ticker", "") or ""
-            exchange = entry.get("exchange", "") or ""
+            ticker     = entry.get("ticker", "") or ""
+            exchange   = entry.get("exchange", "") or ""
 
-            url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
-            data = await _fetch(client, url, sem)
+            url  = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+            data = await _fetch(client, url)
+
             if data:
-                row = _parse_submission(cik_str, data, ticker, exchange)
-                batch.append(row)
+                batch.append(_parse_submission(cik_str, data, ticker, exchange))
                 processed += 1
             else:
                 failed += 1
-                logger.debug("Failed to fetch CIK %s", cik_str)
 
             # Flush batch to DB
             if len(batch) >= BATCH_SIZE:
                 await database.bulk_upsert_companies(batch)
                 batch.clear()
 
+            # Update progress every company
             _update(processed=processed, failed=failed)
-            if (processed + failed) % 100 == 0:
+
+            # Persist to DB every 100 companies
+            if (i + 1) % 100 == 0:
                 await database.update_ingest_job(job_id, processed, failed, total, "running")
+                logger.info("Progress: %d / %d (%.0f%%)", i + 1, total,
+                            (i + 1) / total * 100)
 
-        # Run fetches with bounded concurrency
-        tasks = [fetch_one(e) for e in unique]
-        await asyncio.gather(*tasks)
-
-        # Flush remaining rows
+        # Flush any remaining rows
         if batch:
             await database.bulk_upsert_companies(batch)
 
