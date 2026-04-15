@@ -1,5 +1,4 @@
-import { useState, useEffect } from 'react'
-import { api } from '../api'
+import { useState } from 'react'
 
 const CATEGORIES = [
   'Large accelerated filer',
@@ -9,15 +8,11 @@ const CATEGORIES = [
 ]
 
 export default function FilterPanel({ filters, onChange, options }) {
-  const [sicSearch, setSicSearch]         = useState('')
-  const [allSicCodes, setAllSicCodes]     = useState([])
-  const [sicDropdown, setSicDropdown]     = useState(false)
+  const [sicSearch, setSicSearch] = useState('')
+  const [sicDropdown, setSicDropdown] = useState(false)
 
-  useEffect(() => {
-    api.getSicCodes()
-      .then(d => setAllSicCodes(d.codes || []))
-      .catch(() => {})
-  }, [])
+  // SIC codes come from the loaded companies data via the options prop
+  const allSicCodes = options.sics ?? []
 
   function set(key, val) {
     onChange({ ...filters, [key]: val })
