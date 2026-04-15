@@ -104,8 +104,8 @@ def _parse_submission(cik_str: str, data: dict, ticker: str, exchange: str) -> d
     return {
         "cik":                    cik_str,
         "name":                   data.get("name", ""),
-        "ticker":                 ticker,
-        "exchange":               exchange,
+        "ticker":                 ticker or (data.get("tickers") or [""])[0],
+        "exchange":               exchange or (data.get("exchanges") or [""])[0],
         "sic":                    data.get("sic", ""),
         "sic_description":        data.get("sicDescription", ""),
         "state_of_incorporation": data.get("stateOfIncorporation", ""),
@@ -139,9 +139,10 @@ async def run_ingest(force: bool = False):
     async with httpx.AsyncClient(follow_redirects=True) as client:
 
         # ── Step 1: fetch company list ─────────────────────────────────────────
+        # company_tickers.json format: {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}, ...}
         logger.info("Fetching company tickers list …")
         ticker_data = await _fetch(
-            client, "https://www.sec.gov/files/company_tickers_exchange.json",
+            client, "https://www.sec.gov/files/company_tickers.json",
             timeout=60,
         )
         if not ticker_data:
@@ -150,9 +151,11 @@ async def run_ingest(force: bool = False):
             await database.update_ingest_job(job_id, 0, 0, 0, "failed")
             return
 
-        # De-duplicate by CIK
+        # De-duplicate by CIK (values are dicts with cik_str, ticker, title)
         seen: dict[str, dict] = {}
         for e in ticker_data.values():
+            if not isinstance(e, dict):
+                continue
             cik = str(e.get("cik_str", "")).strip()
             if cik and cik not in seen:
                 seen[cik] = e
@@ -183,7 +186,7 @@ async def run_ingest(force: bool = False):
             cik_str    = str(entry.get("cik_str", ""))
             cik_padded = cik_str.zfill(10)
             ticker     = entry.get("ticker", "") or ""
-            exchange   = entry.get("exchange", "") or ""
+            exchange   = ""   # not in company_tickers.json; pulled from submissions below
 
             url  = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
             data = await _fetch(client, url)

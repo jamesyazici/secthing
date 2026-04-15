@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
 
-# Allow this workflow to write to the repo (needed for gh-pages branch)
 permissions:
   contents: write
 
@@ -12,11 +11,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
@@ -29,14 +26,12 @@ jobs:
       - name: Build
         working-directory: frontend
         env:
-          # Set these in: GitHub repo → Settings → Secrets and variables → Actions → Variables
-          # VITE_API_URL  = https://your-app.onrender.com
-          # VITE_BASE_PATH = /your-repo-name/
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # Set VITE_BASE_PATH in: GitHub repo → Settings → Variables → Actions
+          # Value should be: /secthing/   (your repo name with slashes)
           VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH }}
         run: npm run build
 
-      - name: Deploy to gh-pages branch
+      - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

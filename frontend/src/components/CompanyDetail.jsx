@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../api'
+import { fetchCompanyDetail } from '../api'
 
 function Row({ label, value }) {
   if (!value && value !== 0) return null
@@ -22,16 +22,19 @@ function Section({ title, children }) {
   )
 }
 
-export default function CompanyDetail({ cik, onClose }) {
-  const [data, setData]       = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState(null)
+export default function CompanyDetail({ cik, localData, onClose }) {
+  const [liveData, setLiveData] = useState(null)
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState(null)
+
+  // Merge local (fast) data with live SEC detail (slower)
+  const data = liveData ? { ...localData, ...liveData } : localData
 
   useEffect(() => {
     setLoading(true)
     setError(null)
-    api.getCompany(cik)
-      .then(setData)
+    fetchCompanyDetail(cik)
+      .then(setLiveData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false))
   }, [cik])
